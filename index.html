@@ -131,14 +131,20 @@
 
   const GAP = 26;          // spacing between dots
   const BASE = 1.3;        // resting dot radius
-  const BOOST = 3.2;       // extra radius near the pointer
-  const RANGE = 170;       // how far the "sensing" reaches
+  const BOOST = 3.2;       // extra radius when lit
+  const RANGE = 170;       // how far the pointer "sensing" reaches
 
-  let w, h, dpr, cols, rows;
+  const SPEED = 420;       // pulse speed, px per second
+  const PAUSE = 2;         // seconds to wait after a pulse finishes before the next one
+  const WIDTH = 70;        // thickness of the ring, px (same as the original ripple)
+  const MIN_GLOW = 0.15;   // brightness where the pulse starts
+  const MAX_GLOW = 0.95;   // brightness when it reaches the far corner
+
+  let w, h, dpr, cols, rows, ox, oy;
+  let reach = 1;           // distance the pulse travels before it finishes
   let dotColor, signalColor;
   const pointer = { x: -9999, y: -9999, tx: -9999, ty: -9999 };
-  let pulse = 0;           // load ripple radius
-  let running = false;
+  let cycleStart = null;   // when the current pulse cycle began (seconds)
 
   function readColors() {
     const s = getComputedStyle(document.documentElement);
@@ -151,6 +157,11 @@
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
+  function measureReach() {
+    // same path as the original ripple: from the bottom-left corner until fully off-screen
+    reach = Math.hypot(w, h) + 140;
+  }
+
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     w = window.innerWidth;
@@ -160,34 +171,43 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     cols = Math.ceil(w / GAP) + 1;
     rows = Math.ceil(h / GAP) + 1;
-    draw();
+    ox = (w % GAP) / 2;
+    oy = (h % GAP) / 2;
+    measureReach();
+    draw(performance.now() / 1000);
   }
 
-  function draw() {
+  function draw(now) {
     ctx.clearRect(0, 0, w, h);
-    const ox = (w % GAP) / 2;
-    const oy = (h % GAP) / 2;
-    const maxR = Math.hypot(w, h);
+    let rad = -1;
+    if (cycleStart !== null) {
+      const travel = reach / SPEED;
+      const elapsed = (now - cycleStart) % (travel + PAUSE);
+      if (elapsed < travel) rad = elapsed * SPEED;
+    }
+    const glow = rad >= 0 ? MIN_GLOW + (MAX_GLOW - MIN_GLOW) * Math.min(1, rad / reach) : 0;
+    const c0 = dotColor, c1 = signalColor;
 
     for (let i = 0; i < cols; i++) {
       for (let j = 0; j < rows; j++) {
         const x = ox + i * GAP;
         const y = oy + j * GAP;
 
-        // closeness to pointer (0..1)
-        const d = Math.hypot(x - pointer.x, y - pointer.y);
-        let t = Math.max(0, 1 - d / RANGE);
+        // pointer glow
+        const dp = Math.hypot(x - pointer.x, y - pointer.y);
+        let t = Math.max(0, 1 - dp / RANGE);
         t = t * t;
 
-        // load ripple: a thin ring travelling outward from bottom-left
-        if (pulse > 0 && pulse < maxR + 120) {
-          const pd = Math.abs(Math.hypot(x, y - h) - pulse);
-          const ring = Math.max(0, 1 - pd / 70) * 0.8;
-          if (ring > t) t = ring;
+        // pulse ring from the bottom-left corner, brighter as it expands
+        if (rad >= 0) {
+          const off = Math.abs(Math.hypot(x, y - h) - rad);
+          if (off < WIDTH) {
+            const ring = (1 - off / WIDTH) * glow;
+            if (ring > t) t = ring;
+          }
         }
 
         const r = BASE + BOOST * t;
-        const c0 = dotColor, c1 = signalColor;
         const cr = Math.round(c0[0] + (c1[0] - c0[0]) * t);
         const cg = Math.round(c0[1] + (c1[1] - c0[1]) * t);
         const cb = Math.round(c0[2] + (c1[2] - c0[2]) * t);
@@ -199,41 +219,37 @@
     }
   }
 
-  function tick() {
+  function tick(ms) {
+    const now = ms / 1000;
     pointer.x += (pointer.tx - pointer.x) * 0.15;
     pointer.y += (pointer.ty - pointer.y) * 0.15;
-    if (pulse > 0) pulse += 14;
-    if (pulse > Math.hypot(w, h) + 140) pulse = 0;
-    draw();
 
-    const settled = Math.abs(pointer.tx - pointer.x) < 0.5 &&
-                    Math.abs(pointer.ty - pointer.y) < 0.5 && pulse === 0;
-    if (settled) { running = false; return; }
+    if (cycleStart === null) cycleStart = now;
+
+    draw(now);
     requestAnimationFrame(tick);
-  }
-
-  function start() {
-    if (reduce.matches) { pointer.x = pointer.tx; pointer.y = pointer.ty; pulse = 0; draw(); return; }
-    if (!running) { running = true; requestAnimationFrame(tick); }
   }
 
   function setPointer(x, y) {
     pointer.tx = x; pointer.ty = y;
     if (pointer.x < -9000) { pointer.x = x; pointer.y = y; }
-    start();
+    if (reduce.matches) { pointer.x = x; pointer.y = y; draw(performance.now() / 1000); }
   }
 
   window.addEventListener('pointermove', e => setPointer(e.clientX, e.clientY));
   window.addEventListener('pointerdown', e => setPointer(e.clientX, e.clientY));
-  document.addEventListener('pointerleave', () => { pointer.tx = -9999; pointer.ty = -9999; pointer.x = -9999; pointer.y = -9999; start(); });
+  document.addEventListener('pointerleave', () => {
+    pointer.tx = pointer.ty = pointer.x = pointer.y = -9999;
+    if (reduce.matches) draw(performance.now() / 1000);
+  });
   window.addEventListener('resize', resize);
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readColors(); draw(); });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readColors(); draw(performance.now() / 1000); });
 
   readColors();
   resize();
 
-  // single ripple on load
-  if (!reduce.matches) { pulse = 1; start(); }
+  // repeating pulse (static dots if the visitor prefers reduced motion)
+  if (!reduce.matches) requestAnimationFrame(tick);
 })();
 </script>
 </body>
